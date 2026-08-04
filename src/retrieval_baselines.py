@@ -222,17 +222,26 @@ class DenseEmbeddingRetriever:
         self.train_df = train_df
         self.train_responses = train_df["output"].astype(str).tolist()
         train_prompts = train_df["input"].astype(str).tolist()
+
+        # For fast CPU evaluation, sample 20,000 train prompts if corpus is larger
+        if len(train_prompts) > 20000:
+            sample_indices = np.linspace(0, len(train_prompts) - 1, num=20000, dtype=int)
+            train_prompts_sub = [train_prompts[i] for i in sample_indices]
+            self.train_responses = [self.train_responses[i] for i in sample_indices]
+        else:
+            train_prompts_sub = train_prompts
+
         print(f"Loading SentenceTransformer model: {model_name}...")
         self.model = SentenceTransformer(model_name)
-        print("Encoding train prompts for Dense Embedding Retrieval...")
+        print(f"Encoding {len(train_prompts_sub)} train prompts for Dense Embedding Retrieval...")
         self.train_embeddings = normalize(
-            self.model.encode(train_prompts, batch_size=256, show_progress_bar=True, convert_to_numpy=True),
+            self.model.encode(train_prompts_sub, batch_size=512, show_progress_bar=False, convert_to_numpy=True),
             norm="l2"
         )
 
-    def retrieve(self, val_prompts: list[str], batch_size: int = 1000) -> list[str]:
+    def retrieve(self, val_prompts: list[str], batch_size: int = 2000) -> list[str]:
         val_embeddings = normalize(
-            self.model.encode(val_prompts, batch_size=128, show_progress_bar=True, convert_to_numpy=True),
+            self.model.encode(val_prompts, batch_size=256, show_progress_bar=False, convert_to_numpy=True),
             norm="l2"
         )
         predictions: list[str] = []

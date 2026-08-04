@@ -1,8 +1,40 @@
-model_name: TBD
-model_revision: TBD
-lora_r: TBD
-lora_alpha: TBD
-learning_rate: TBD
-batch_size: TBD
-seed: TBD
-split_version: TBD
+# Competition settings (shared across all scripts)
+competition_input_directory: data/raw
+train_filename: train.csv
+test_filename: test.csv
+id_column: id
+prompt_column: input
+response_column: output
+submission_prediction_column: output
+
+# Fixed split
+split_version: split_v1
+split_json: data/processed/split_v1.json
+
+# Model (from model_research.md — PRIMARY selection)
+model_name: Qwen/Qwen2.5-1.5B-Instruct
+model_revision: main
+exact_total_parameters: "1.54B"
+
+# QLoRA hyper-parameters
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+
+# Training defaults
+learning_rate: 2.0e-4
+batch_size: 4
+gradient_accumulation_steps: 4
+max_seq_len: 512
+seed: 42
+
+# System prompt (Bengali)
+system_prompt: "আপনি একজন অভিজ্ঞ বাংলাদেশি চিকিৎসক। রোগীর প্রশ্নের উত্তর বাংলায় সংক্ষিপ্ত ও স্পষ্টভাবে দিন।"
