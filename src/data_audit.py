@@ -188,7 +188,7 @@ def row_statistics(series: pd.Series) -> dict[str, Any]:
     char_counts = values.str.len()
     word_counts = values.str.split().map(len)
     return {
-        "count": int(len(values)),
+        "count": len(values),
         "missing": int(series.isna().sum()),
         "unique": int(values.nunique(dropna=False)),
         "chars": {
