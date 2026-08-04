@@ -255,6 +255,8 @@ def embedding_near_duplicates(
 ) -> dict[str, Any]:
     combined_texts = normalize_series(pd.concat([train_prompts, test_prompts], ignore_index=True))
     train_count = len(train_prompts)
+    train_lengths = train_prompts.fillna("").astype(str).str.len().to_numpy()
+    test_lengths = test_prompts.fillna("").astype(str).str.len().to_numpy()
 
     vectorizer = HashingVectorizer(
         analyzer="char_wb",
@@ -273,22 +275,53 @@ def embedding_near_duplicates(
             "status": "insufficient_rows",
         }
 
+    pairs = []
+    if train_count == 0 or len(test_prompts) == 0:
+        return {
+            "method": "hashing_char_wb_embeddings",
+            "threshold": threshold,
+            "pairs": [],
+            "status": "insufficient_rows",
+        }
+
+    all_lengths = np.concatenate([train_lengths, test_lengths])
+    min_length = int(all_lengths.min())
+    max_length = int(all_lengths.max())
+    if min_length == max_length:
+        bins = np.array([min_length - 1, max_length + 1])
+    else:
+        bins = np.linspace(min_length, max_length + 1, num=6)
+
+    train_bins = pd.cut(train_lengths, bins=bins, labels=False, include_lowest=True, duplicates="drop")
+    test_bins = pd.cut(test_lengths, bins=bins, labels=False, include_lowest=True, duplicates="drop")
     train_embeddings = matrix[:train_count]
     test_embeddings = matrix[train_count:]
-    nn = NearestNeighbors(n_neighbors=1, metric="cosine", algorithm="brute")
-    nn.fit(train_embeddings)
-    distances, indices = nn.kneighbors(test_embeddings)
-    pairs = []
-    for test_index, (distance, train_index) in enumerate(zip(distances[:, 0], indices[:, 0])):
-        score = float(1.0 - distance)
-        if score >= threshold:
-            pairs.append(
-                {
-                    "test_row": int(test_index),
-                    "train_row": int(train_index),
-                    "score": score,
-                }
-            )
+
+    for bucket in sorted(pd.Series(test_bins).dropna().unique()):
+        bucket = int(bucket)
+        train_mask = train_bins == bucket
+        test_mask = test_bins == bucket
+        if not train_mask.any() or not test_mask.any():
+            continue
+
+        bucket_train_embeddings = train_embeddings[train_mask]
+        bucket_test_embeddings = test_embeddings[test_mask]
+        nn = NearestNeighbors(n_neighbors=1, metric="cosine", algorithm="brute")
+        nn.fit(bucket_train_embeddings)
+        distances, indices = nn.kneighbors(bucket_test_embeddings)
+
+        test_positions = np.flatnonzero(test_mask)
+        train_positions = np.flatnonzero(train_mask)
+        for local_test_index, (distance, train_index) in enumerate(zip(distances[:, 0], indices[:, 0])):
+            score = float(1.0 - distance)
+            if score >= threshold:
+                pairs.append(
+                    {
+                        "test_row": int(test_positions[local_test_index]),
+                        "train_row": int(train_positions[train_index]),
+                        "score": score,
+                    }
+                )
 
     return {
         "method": "hashing_char_wb_embeddings",
