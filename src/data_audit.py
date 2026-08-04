@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from collections import Counter, defaultdict
 import json
 import re
-from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
