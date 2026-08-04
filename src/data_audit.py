@@ -318,9 +318,9 @@ def build_report(train: pd.DataFrame, test: pd.DataFrame, prompt_column: str, re
     train_response_text = train[response_column].fillna("").astype(str)
     mark_status("build_report:text_columns_loaded")
 
-    train_prompt_norm = train_prompt_text.str.strip().str.lower()
-    test_prompt_norm = test_prompt_text.str.strip().str.lower()
-    train_response_norm = train_response_text.str.strip().str.lower()
+    train_prompt_norm = train_prompt_text
+    test_prompt_norm = test_prompt_text
+    train_response_norm = train_response_text
     exact_cross_prompt_overlap = sorted({value for value in test_prompt_norm if value and value in set(train_prompt_norm)})
     exact_cross_pairs = []
     prompt_to_train_rows = train_prompt_norm[train_prompt_norm != ""].groupby(train_prompt_norm[train_prompt_norm != ""]).indices
