@@ -23,6 +23,7 @@ CONFIG_PATH = ROOT / "config" / "competition_info.yaml"
 OUTPUT_DIR = ROOT / "outputs"
 REPORT_MD_PATH = OUTPUT_DIR / "data_audit.md"
 REPORT_JSON_PATH = OUTPUT_DIR / "data_audit.json"
+STATUS_PATH = OUTPUT_DIR / "data_audit_status.txt"
 
 BANGLA_RE = re.compile(r"[\u0980-\u09FF]")
 LATIN_RE = re.compile(r"[A-Za-z]")
@@ -202,7 +203,7 @@ def row_statistics(series: pd.Series) -> dict[str, Any]:
 
 def risk_flags(series: pd.Series) -> dict[str, int]:
     hits: Counter[str] = Counter()
-    for text in series.fillna("").astype(str):
+    for text in series.fillna("").astype(str).drop_duplicates():
         lower = text.lower()
         for keyword in RISK_KEYWORDS:
             if keyword.lower() in lower:
@@ -298,10 +299,16 @@ def write_config_updates(prompt_column: str, response_column: str) -> dict[str, 
     return updated
 
 
+def mark_status(message: str) -> None:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    STATUS_PATH.write_text(message + "\n", encoding="utf-8")
+
+
 def build_report(train: pd.DataFrame, test: pd.DataFrame, prompt_column: str, response_column: str, train_object_columns: list[str], test_object_columns: list[str]) -> dict[str, Any]:
     train_prompt_norm = train[prompt_column].map(normalize_text)
     test_prompt_norm = test[prompt_column].map(normalize_text)
     train_response_norm = train[response_column].map(normalize_text)
+    mark_status("build_report:normalized_text")
 
     exact_cross_prompt_overlap = sorted({value for value in test_prompt_norm if value and value in set(train_prompt_norm)})
     exact_cross_pairs = []
@@ -318,6 +325,7 @@ def build_report(train: pd.DataFrame, test: pd.DataFrame, prompt_column: str, re
                     "train_rows": prompt_to_train_rows[value][:10],
                 }
             )
+    mark_status("build_report:exact_duplicates_done")
 
     train_full_row_duplicates = int(train.duplicated().sum())
     test_full_row_duplicates = int(test.duplicated().sum())
@@ -326,8 +334,36 @@ def build_report(train: pd.DataFrame, test: pd.DataFrame, prompt_column: str, re
 
     prompt_conflicts = conflict_summary(train, prompt_column, response_column)
 
-    near_duplicate_summary = embedding_near_duplicates(train[prompt_column], test[prompt_column], threshold=0.90)
+    train_unique_prompt_rows = (
+        train.assign(_normalized_prompt=train_prompt_norm)
+        .loc[lambda frame: frame["_normalized_prompt"] != ""]
+        .drop_duplicates(subset=["_normalized_prompt"], keep="first")
+    )
+    test_unique_prompt_rows = (
+        test.assign(_normalized_prompt=test_prompt_norm)
+        .loc[lambda frame: frame["_normalized_prompt"] != ""]
+        .drop_duplicates(subset=["_normalized_prompt"], keep="first")
+    )
+    mark_status(f"build_report:unique_prompts train={len(train_unique_prompt_rows)} test={len(test_unique_prompt_rows)}")
+
+    near_duplicate_summary = embedding_near_duplicates(
+        train_unique_prompt_rows[prompt_column],
+        test_unique_prompt_rows[prompt_column],
+        threshold=0.90,
+    )
     near_duplicate_pairs = near_duplicate_summary["pairs"]
+    mark_status(f"build_report:near_duplicates_done pairs={len(near_duplicate_pairs)}")
+
+    train_unique_prompt_series = train_unique_prompt_rows[prompt_column].fillna("").astype(str)
+    train_unique_response_series = (
+        train.assign(_normalized_response=train_response_norm)
+        .loc[lambda frame: frame["_normalized_response"] != ""]
+        .drop_duplicates(subset=["_normalized_response"], keep="first")[response_column]
+        .fillna("")
+        .astype(str)
+    )
+    test_unique_prompt_series = test_unique_prompt_rows[prompt_column].fillna("").astype(str)
+    mark_status("build_report:unique_text_series_ready")
 
     repeated_responses = train[response_column].fillna("").astype(str).value_counts()
     unique_response_ratio = float(train[response_column].fillna("").astype(str).nunique() / len(train)) if len(train) else 0.0
@@ -383,16 +419,17 @@ def build_report(train: pd.DataFrame, test: pd.DataFrame, prompt_column: str, re
             "test_prompt": row_statistics(test[prompt_column]),
         },
         "vocabulary": {
-            "prompt_unique_tokens": int(len({token for token, _ in top_tokens(train[prompt_column], limit=10_000)})),
-            "prompt_top_tokens": top_tokens(train[prompt_column], limit=50),
-            "response_unique_tokens": int(len({token for token, _ in top_tokens(train[response_column], limit=10_000)})),
-            "response_top_tokens": top_tokens(train[response_column], limit=50),
+            "prompt_unique_tokens": int(len({token for token, _ in top_tokens(train_unique_prompt_series, limit=10_000)})),
+            "prompt_top_tokens": top_tokens(train_unique_prompt_series, limit=50),
+            "response_unique_tokens": int(len({token for token, _ in top_tokens(train_unique_response_series, limit=10_000)})),
+            "response_top_tokens": top_tokens(train_unique_response_series, limit=50),
         },
         "language_quality": {
             "train_prompt": text_quality(train[prompt_column]),
             "train_response": text_quality(train[response_column]),
             "test_prompt": text_quality(test[prompt_column]),
         },
+        
         "response_diversity": {
             "unique_response_ratio": unique_response_ratio,
             "responses_seen_2plus": int((repeated_responses >= 2).sum()),
@@ -419,9 +456,9 @@ def build_report(train: pd.DataFrame, test: pd.DataFrame, prompt_column: str, re
             },
         },
         "safety_risk_surface": {
-            "train_prompt_keyword_hits": risk_flags(train[prompt_column]),
-            "train_response_keyword_hits": risk_flags(train[response_column]),
-            "test_prompt_keyword_hits": risk_flags(test[prompt_column]),
+            "train_prompt_keyword_hits": risk_flags(train_unique_prompt_series),
+            "train_response_keyword_hits": risk_flags(train_unique_response_series),
+            "test_prompt_keyword_hits": risk_flags(test_unique_prompt_series),
             "purpose": "Triage aid for manual review, not a diagnostic classifier.",
         },
         "notes": {
@@ -497,17 +534,22 @@ def render_markdown(report: dict[str, Any]) -> str:
 
 def main() -> int:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    mark_status("starting")
 
     train = pd.read_csv(TRAIN_PATH)
     test = pd.read_csv(TEST_PATH)
+    mark_status(f"loaded_csv train={len(train)} test={len(test)}")
 
     prompt_column, response_column, train_object_columns, test_object_columns = infer_text_columns(train, test)
     config_update = write_config_updates(prompt_column, response_column)
+    mark_status(f"config_updated prompt={prompt_column} response={response_column}")
     report = build_report(train, test, prompt_column, response_column, train_object_columns, test_object_columns)
+    mark_status("report_built")
     report["config_update"] = config_update
 
     REPORT_JSON_PATH.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     REPORT_MD_PATH.write_text(render_markdown(report), encoding="utf-8")
+    mark_status("finished")
 
     print(json.dumps(
         {
