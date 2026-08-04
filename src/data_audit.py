@@ -11,8 +11,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import yaml
-from sklearn.decomposition import TruncatedSVD
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction.text import HashingVectorizer, TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.neighbors import NearestNeighbors
 
@@ -239,28 +238,26 @@ def embedding_near_duplicates(
     combined_texts = pd.concat([train_prompts, test_prompts], ignore_index=True).fillna("").astype(str).map(normalize_text)
     train_count = len(train_prompts)
 
-    vectorizer = TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 5), min_df=1)
-    matrix = vectorizer.fit_transform(combined_texts.tolist())
+    vectorizer = HashingVectorizer(
+        analyzer="char_wb",
+        ngram_range=(3, 5),
+        n_features=2**18,
+        alternate_sign=False,
+        norm="l2",
+    )
+    matrix = vectorizer.transform(combined_texts.tolist())
 
     if train_count == 0 or matrix.shape[0] <= train_count:
         return {
-            "method": "tfidf_char_wb",
+            "method": "hashing_char_wb",
             "threshold": threshold,
             "pairs": [],
             "status": "insufficient_rows",
         }
 
-    n_components = max(1, min(128, matrix.shape[1] - 1, train_count - 1))
-    if n_components >= 1 and matrix.shape[1] > 1 and train_count > 1:
-        dense = TruncatedSVD(n_components=n_components, random_state=42).fit_transform(matrix)
-        embeddings = dense / np.linalg.norm(dense, axis=1, keepdims=True).clip(min=1e-12)
-    else:
-        embeddings = matrix.toarray().astype(np.float32)
-        embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True).clip(min=1e-12)
-
-    train_embeddings = embeddings[:train_count]
-    test_embeddings = embeddings[train_count:]
-    nn = NearestNeighbors(n_neighbors=1, metric="cosine")
+    train_embeddings = matrix[:train_count]
+    test_embeddings = matrix[train_count:]
+    nn = NearestNeighbors(n_neighbors=1, metric="cosine", algorithm="brute")
     nn.fit(train_embeddings)
     distances, indices = nn.kneighbors(test_embeddings)
     pairs = []
@@ -276,7 +273,7 @@ def embedding_near_duplicates(
             )
 
     return {
-        "method": "tfidf_char_wb+svd_dense_embeddings",
+        "method": "hashing_char_wb_embeddings",
         "threshold": threshold,
         "pairs": pairs,
         "status": "ok",
