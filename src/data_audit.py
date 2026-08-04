@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import yaml
+from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.neighbors import NearestNeighbors
@@ -238,77 +239,48 @@ def embedding_near_duplicates(
     combined_texts = pd.concat([train_prompts, test_prompts], ignore_index=True).fillna("").astype(str).map(normalize_text)
     train_count = len(train_prompts)
 
-    model_name = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-    try:
-        from sentence_transformers import SentenceTransformer
+    vectorizer = TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 5), min_df=1)
+    matrix = vectorizer.fit_transform(combined_texts.tolist())
 
-        model = SentenceTransformer(model_name)
-        embeddings = model.encode(combined_texts.tolist(), normalize_embeddings=True, batch_size=32, show_progress_bar=False)
-        embeddings = np.asarray(embeddings, dtype=np.float32)
-        train_embeddings = embeddings[:train_count]
-        test_embeddings = embeddings[train_count:]
-
-        if len(train_embeddings) == 0 or len(test_embeddings) == 0:
-            return {
-                "method": model_name,
-                "threshold": threshold,
-                "pairs": [],
-                "status": "insufficient_rows",
-            }
-
-        nn = NearestNeighbors(n_neighbors=1, metric="cosine")
-        nn.fit(train_embeddings)
-        distances, indices = nn.kneighbors(test_embeddings)
-        pairs = []
-        for test_index, (distance, train_index) in enumerate(zip(distances[:, 0], indices[:, 0])):
-            score = float(1.0 - distance)
-            if score >= threshold:
-                pairs.append(
-                    {
-                        "test_row": int(test_index),
-                        "train_row": int(train_index),
-                        "score": score,
-                    }
-                )
-
+    if train_count == 0 or matrix.shape[0] <= train_count:
         return {
-            "method": model_name,
+            "method": "tfidf_char_wb",
             "threshold": threshold,
-            "pairs": pairs,
-            "status": "ok",
+            "pairs": [],
+            "status": "insufficient_rows",
         }
-    except Exception as exc:  # pragma: no cover - fallback only if model download/runtime fails
-        vectorizer = TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 5), min_df=1)
-        matrix = vectorizer.fit_transform(combined_texts.tolist())
-        train_matrix = matrix[:train_count]
-        test_matrix = matrix[train_count:]
-        if train_matrix.shape[0] == 0 or test_matrix.shape[0] == 0:
-            return {
-                "method": f"tfidf_fallback:{exc}",
-                "threshold": threshold,
-                "pairs": [],
-                "status": "insufficient_rows",
-            }
 
-        similarities = cosine_similarity(test_matrix, train_matrix)
-        best_scores = similarities.max(axis=1)
-        best_indices = similarities.argmax(axis=1)
-        pairs = []
-        for test_index, (score, train_index) in enumerate(zip(best_scores, best_indices)):
-            if float(score) >= threshold:
-                pairs.append(
-                    {
-                        "test_row": int(test_index),
-                        "train_row": int(train_index),
-                        "score": float(score),
-                    }
-                )
-        return {
-            "method": f"tfidf_fallback:{exc}",
-            "threshold": threshold,
-            "pairs": pairs,
-            "status": "fallback_used",
-        }
+    n_components = max(1, min(128, matrix.shape[1] - 1, train_count - 1))
+    if n_components >= 1 and matrix.shape[1] > 1 and train_count > 1:
+        dense = TruncatedSVD(n_components=n_components, random_state=42).fit_transform(matrix)
+        embeddings = dense / np.linalg.norm(dense, axis=1, keepdims=True).clip(min=1e-12)
+    else:
+        embeddings = matrix.toarray().astype(np.float32)
+        embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True).clip(min=1e-12)
+
+    train_embeddings = embeddings[:train_count]
+    test_embeddings = embeddings[train_count:]
+    nn = NearestNeighbors(n_neighbors=1, metric="cosine")
+    nn.fit(train_embeddings)
+    distances, indices = nn.kneighbors(test_embeddings)
+    pairs = []
+    for test_index, (distance, train_index) in enumerate(zip(distances[:, 0], indices[:, 0])):
+        score = float(1.0 - distance)
+        if score >= threshold:
+            pairs.append(
+                {
+                    "test_row": int(test_index),
+                    "train_row": int(train_index),
+                    "score": score,
+                }
+            )
+
+    return {
+        "method": "tfidf_char_wb+svd_dense_embeddings",
+        "threshold": threshold,
+        "pairs": pairs,
+        "status": "ok",
+    }
 
 
 def write_config_updates(prompt_column: str, response_column: str) -> dict[str, Any]:
