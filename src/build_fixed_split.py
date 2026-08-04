@@ -15,8 +15,6 @@ import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import HashingVectorizer
 from sklearn.model_selection import StratifiedGroupKFold
-from sklearn.neighbors import NearestNeighbors
-
 
 ROOT = Path(__file__).resolve().parents[1]
 TRAIN_PATH = ROOT / "data" / "raw" / "train.csv"
@@ -27,8 +25,7 @@ SEED = 42
 PROMPT_COLUMN = "input"
 ID_COLUMN = "id"
 NEAR_DUPLICATE_THRESHOLD = 0.90
-VALIDATION_FOLDS = 10
-TARGET_VALIDATION_RATIO = 0.10
+DEFAULT_VALIDATION_RATIO = 0.10
 
 WHITESPACE_RE = re.compile(r"\s+")
 
@@ -105,20 +102,16 @@ def build_near_duplicate_components(prompts: pd.Series) -> tuple[np.ndarray, int
 
         bucket_texts = unique_prompts.iloc[positions].tolist()
         bucket_matrix = vectorizer.transform(bucket_texts)
-        neighbor_count = min(4, len(positions))
-        neighbors = NearestNeighbors(n_neighbors=neighbor_count, metric="cosine", algorithm="brute")
-        neighbors.fit(bucket_matrix)
-        distances, indices = neighbors.kneighbors(bucket_matrix)
+        sim_matrix = bucket_matrix.dot(bucket_matrix.T)
+        sim_matrix.setdiag(0.0)
+        rows, cols = (sim_matrix >= NEAR_DUPLICATE_THRESHOLD).nonzero()
 
-        for local_index, (row_distances, row_indices) in enumerate(zip(distances, indices)):
-            source_position = int(positions[local_index])
-            for distance, neighbor_index in zip(row_distances[1:], row_indices[1:]):
-                score = float(1.0 - distance)
-                if score >= NEAR_DUPLICATE_THRESHOLD:
-                    target_position = int(positions[int(neighbor_index)])
-                    if source_position != target_position:
-                        union_find.union(source_position, target_position)
-                        near_pairs_found += 1
+        for local_src, local_tgt in zip(rows, cols):
+            if local_src < local_tgt:
+                source_position = int(positions[local_src])
+                target_position = int(positions[local_tgt])
+                union_find.union(source_position, target_position)
+                near_pairs_found += 1
 
     component_roots = np.array([union_find.find(index) for index in range(len(unique_prompts))])
     root_to_component = {root: component_index for component_index, root in enumerate(pd.unique(component_roots).tolist())}
@@ -126,7 +119,7 @@ def build_near_duplicate_components(prompts: pd.Series) -> tuple[np.ndarray, int
     return component_ids, near_pairs_found
 
 
-def choose_split(df: pd.DataFrame) -> SplitResult:
+def choose_split(df: pd.DataFrame, target_validation_ratio: float = DEFAULT_VALIDATION_RATIO) -> SplitResult:
     prompts = df[PROMPT_COLUMN].fillna("").astype(str).map(normalize_text)
     row_lengths = prompts.str.len().to_numpy()
     component_ids, near_pairs_found = build_near_duplicate_components(prompts)
@@ -142,9 +135,10 @@ def choose_split(df: pd.DataFrame) -> SplitResult:
     labels = group_frame["label"].to_numpy()
     groups = group_frame["component_id"].to_numpy()
 
-    splitter = StratifiedGroupKFold(n_splits=VALIDATION_FOLDS, shuffle=True, random_state=SEED)
+    n_splits = round(1.0 / target_validation_ratio)
+    splitter = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=SEED)
     best_split: tuple[tuple[float, float, int], np.ndarray, np.ndarray] | None = None
-    target_validation_rows = len(df) * TARGET_VALIDATION_RATIO
+    target_validation_rows = len(df) * target_validation_ratio
 
     for _, validation_indices in splitter.split(features, labels, groups=groups):
         validation_components = set(groups[validation_indices])
@@ -292,11 +286,12 @@ def write_split_and_log(split: SplitResult, summary: dict[str, Any]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--ratio", type=float, default=DEFAULT_VALIDATION_RATIO, help="Target validation ratio (e.g., 0.10 for 90/10 or 0.15 for 85/15).")
     parser.add_argument("--write", action="store_true", help="Write split_v1.json and append the experiment log row.")
     args = parser.parse_args()
 
     df = pd.read_csv(TRAIN_PATH)
-    split = choose_split(df)
+    split = choose_split(df, target_validation_ratio=args.ratio)
     summary = build_summary(split)
 
     print(f"seed={summary['seed']}")
