@@ -66,6 +66,14 @@ def normalize_text(value: Any) -> str:
     return WHITESPACE_RE.sub(" ", str(value)).strip().lower()
 
 
+def normalize_series(series: pd.Series) -> pd.Series:
+    values = series.fillna("").astype(str)
+    codes, uniques = pd.factorize(values, sort=False)
+    normalized_uniques = [normalize_text(value) for value in uniques]
+    normalized = np.asarray(normalized_uniques, dtype=object)[codes]
+    return pd.Series(normalized, index=series.index)
+
+
 def safe_utf8_row_count(series: pd.Series) -> dict[str, int]:
     encodable = 0
     non_encodable = 0
@@ -236,7 +244,7 @@ def embedding_near_duplicates(
     test_prompts: pd.Series,
     threshold: float = 0.90,
 ) -> dict[str, Any]:
-    combined_texts = pd.concat([train_prompts, test_prompts], ignore_index=True).fillna("").astype(str).map(normalize_text)
+    combined_texts = normalize_series(pd.concat([train_prompts, test_prompts], ignore_index=True))
     train_count = len(train_prompts)
 
     vectorizer = HashingVectorizer(
@@ -305,17 +313,17 @@ def mark_status(message: str) -> None:
 
 
 def build_report(train: pd.DataFrame, test: pd.DataFrame, prompt_column: str, response_column: str, train_object_columns: list[str], test_object_columns: list[str]) -> dict[str, Any]:
-    train_prompt_norm = train[prompt_column].map(normalize_text)
-    test_prompt_norm = test[prompt_column].map(normalize_text)
-    train_response_norm = train[response_column].map(normalize_text)
-    mark_status("build_report:normalized_text")
+    train_prompt_text = train[prompt_column].fillna("").astype(str)
+    test_prompt_text = test[prompt_column].fillna("").astype(str)
+    train_response_text = train[response_column].fillna("").astype(str)
+    mark_status("build_report:text_columns_loaded")
 
+    train_prompt_norm = train_prompt_text.str.strip().str.lower()
+    test_prompt_norm = test_prompt_text.str.strip().str.lower()
+    train_response_norm = train_response_text.str.strip().str.lower()
     exact_cross_prompt_overlap = sorted({value for value in test_prompt_norm if value and value in set(train_prompt_norm)})
     exact_cross_pairs = []
-    prompt_to_train_rows = defaultdict(list)
-    for index, value in train_prompt_norm.items():
-        if value:
-            prompt_to_train_rows[value].append(int(index))
+    prompt_to_train_rows = train_prompt_norm[train_prompt_norm != ""].groupby(train_prompt_norm[train_prompt_norm != ""]).indices
     for test_index, value in test_prompt_norm.items():
         if value and value in prompt_to_train_rows:
             exact_cross_pairs.append(
