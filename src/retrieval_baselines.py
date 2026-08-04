@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
 import re
 import time
 from dataclasses import asdict, dataclass
@@ -14,7 +13,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from rank_bm25 import BM25Okapi
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import normalize
 

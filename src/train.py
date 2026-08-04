@@ -28,7 +28,6 @@ import argparse
 import csv
 import json
 import logging
-import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -341,8 +340,8 @@ def append_experiment_log(row: dict[str, Any]) -> None:
 
 def load_model_and_tokenizer(output_dir: Path) -> tuple[Any, Any]:
     """Load Qwen2.5-1.5B-Instruct in 4-bit NF4 with LoRA adapters."""
+    from peft import LoraConfig, TaskType, get_peft_model
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-    from peft import LoraConfig, get_peft_model, TaskType
 
     log.info("Loading tokenizer: %s", MODEL_ID)
     tokenizer = AutoTokenizer.from_pretrained(
@@ -529,13 +528,13 @@ def main() -> int:
     )
     append_experiment_log({
         "experiment_id": experiment_id,
-        "dataset_version": f"train_rows=108954;sha256=3ea68ae5e025ec82700a67716d3cbcecb37869e10569045b85c3b1734b525b80",
+        "dataset_version": "train_rows=108954;sha256=3ea68ae5e025ec82700a67716d3cbcecb37869e10569045b85c3b1734b525b80",
         "split_version": "split_v1",
         "model_name": MODEL_ID,
         "model_revision": MODEL_REVISION,
         "exact_total_parameters": f"{param_counts['total']/1e9:.3f}B",
         "trainable_parameters": f"{param_counts['trainable']/1e6:.1f}M",
-        "tokenizer": f"Qwen2.5 BPE v151646",
+        "tokenizer": "Qwen2.5 BPE v151646",
         "training_config": training_cfg_str,
         "decision_next_step": "training started",
     })
@@ -550,7 +549,7 @@ def main() -> int:
 
     # ── Step 4: Training ──────────────────────────────────────────────────────
     log.info("\nSTEP 4 — Training")
-    from transformers import TrainingArguments, Trainer
+    from transformers import Trainer, TrainingArguments
 
     resume_from = None
     if args.resume:
@@ -630,7 +629,7 @@ def main() -> int:
     # ── Update experiment log with training outcome ────────────────────────────
     append_experiment_log({
         "experiment_id": f"{experiment_id}-COMPLETE",
-        "dataset_version": f"train_rows=108954;sha256=3ea68ae5e025ec82700a67716d3cbcecb37869e10569045b85c3b1734b525b80",
+        "dataset_version": "train_rows=108954;sha256=3ea68ae5e025ec82700a67716d3cbcecb37869e10569045b85c3b1734b525b80",
         "split_version": "split_v1",
         "model_name": MODEL_ID,
         "model_revision": MODEL_REVISION,
