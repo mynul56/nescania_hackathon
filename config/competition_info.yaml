@@ -1,8 +1,8 @@
-competition_input_directory: TBD
-train_filename: TBD
-test_filename: TBD
+competition_input_directory: data/raw
+train_filename: train.csv
+test_filename: test.csv
 sample_submission_filename: TBD
 id_column: TBD
-prompt_column: TBD
-response_column: TBD
-submission_prediction_column: TBD
+prompt_column: input
+response_column: output
+submission_prediction_column: output

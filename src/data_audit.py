@@ -1,8 +1,559 @@
-"""Data audit entry point."""
+"""Data audit entry point for the Bengali medical dialogue dataset."""
+
+from __future__ import annotations
+
+import json
+import re
+from collections import Counter, defaultdict
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+import yaml
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.neighbors import NearestNeighbors
+
+
+ROOT = Path(__file__).resolve().parents[1]
+TRAIN_PATH = ROOT / "data" / "raw" / "train.csv"
+TEST_PATH = ROOT / "data" / "raw" / "test.csv"
+CONFIG_PATH = ROOT / "config" / "competition_info.yaml"
+OUTPUT_DIR = ROOT / "outputs"
+REPORT_MD_PATH = OUTPUT_DIR / "data_audit.md"
+REPORT_JSON_PATH = OUTPUT_DIR / "data_audit.json"
+
+BANGLA_RE = re.compile(r"[\u0980-\u09FF]")
+LATIN_RE = re.compile(r"[A-Za-z]")
+DIGIT_RE = re.compile(r"[0-9]")
+WHITESPACE_RE = re.compile(r"\s+")
+
+RISK_KEYWORDS = [
+    "জরুরি",
+    "emergency",
+    "রক্তপাত",
+    "bleeding",
+    "বুক ব্যথা",
+    "chest pain",
+    "শ্বাসকষ্ট",
+    "difficulty breathing",
+    "অজ্ঞান",
+    "faint",
+    "স্ট্রোক",
+    "stroke",
+    "heart attack",
+    "হার্ট অ্যাটাক",
+    "convulsion",
+    "খিঁচুনি",
+    "suicid",
+    "আত্মহত্যা",
+    "poison",
+    "বিষ",
+    "pregnant",
+    "pregnancy",
+    "গর্ভবতী",
+    "জ্বর",
+    "pain",
+    "ব্যথা",
+]
+
+
+def normalize_text(value: Any) -> str:
+    if pd.isna(value):
+        return ""
+    return WHITESPACE_RE.sub(" ", str(value)).strip().lower()
+
+
+def safe_utf8_row_count(series: pd.Series) -> dict[str, int]:
+    encodable = 0
+    non_encodable = 0
+    for value in series.fillna("").astype(str):
+        try:
+            value.encode("utf-8")
+            encodable += 1
+        except UnicodeEncodeError:
+            non_encodable += 1
+    return {
+        "utf8_encodable_rows": encodable,
+        "non_encodable_rows": non_encodable,
+        "total_rows": int(len(series)),
+    }
+
+
+def text_quality(series: pd.Series) -> dict[str, Any]:
+    values = series.fillna("").astype(str)
+    char_counts = values.str.len()
+    word_counts = values.str.split().map(len)
+    total_chars = char_counts.replace(0, np.nan)
+    bangla_counts = values.map(lambda item: len(BANGLA_RE.findall(item)))
+    latin_counts = values.map(lambda item: len(LATIN_RE.findall(item)))
+    digit_counts = values.map(lambda item: len(DIGIT_RE.findall(item)))
+
+    return {
+        "row_count": int(len(values)),
+        "unique_values": int(values.nunique(dropna=False)),
+        "char_stats": {
+            "min": int(char_counts.min()),
+            "mean": float(char_counts.mean()),
+            "median": float(char_counts.median()),
+            "p95": float(char_counts.quantile(0.95)),
+            "max": int(char_counts.max()),
+        },
+        "word_stats": {
+            "min": int(word_counts.min()),
+            "mean": float(word_counts.mean()),
+            "median": float(word_counts.median()),
+            "p95": float(word_counts.quantile(0.95)),
+            "max": int(word_counts.max()),
+        },
+        "script_quality": {
+            "avg_bangla_script_ratio": float((bangla_counts / total_chars).fillna(0).mean()),
+            "avg_latin_ratio": float((latin_counts / total_chars).fillna(0).mean()),
+            "avg_digit_ratio": float((digit_counts / total_chars).fillna(0).mean()),
+            "rows_with_any_bangla": int((bangla_counts > 0).sum()),
+            "rows_with_no_bangla": int((bangla_counts == 0).sum()),
+        },
+        "utf8_sanity": safe_utf8_row_count(series),
+    }
+
+
+def top_tokens(series: pd.Series, limit: int = 50) -> list[tuple[str, int]]:
+    token_counts: Counter[str] = Counter()
+    for text in series.fillna("").astype(str):
+        token_counts.update(re.findall(r"[\u0980-\u09FF]+|[A-Za-z]+|\d+", text.lower()))
+    return token_counts.most_common(limit)
+
+
+def infer_text_columns(train: pd.DataFrame, test: pd.DataFrame) -> tuple[str, str, list[str], list[str]]:
+    train_object_columns = [column for column in train.columns if train[column].dtype == "object"]
+    test_object_columns = [column for column in test.columns if test[column].dtype == "object"]
+
+    name_prompt_candidates = [
+        column
+        for column in train.columns
+        if any(token in column.lower() for token in ["prompt", "question", "query", "input", "symptom", "patient"])
+    ]
+    name_response_candidates = [
+        column
+        for column in train.columns
+        if any(token in column.lower() for token in ["response", "answer", "reply", "output", "doctor"])
+    ]
+
+    prompt_column = name_prompt_candidates[0] if name_prompt_candidates else None
+    response_column = name_response_candidates[0] if name_response_candidates else None
+
+    if prompt_column is None or response_column is None:
+        object_columns = [column for column in train.columns if train[column].dtype == "object"]
+        if len(object_columns) == 1:
+            prompt_column = object_columns[0]
+            response_column = object_columns[0]
+        else:
+            length_order = sorted(
+                object_columns,
+                key=lambda column: train[column].fillna("").astype(str).str.len().mean(),
+            )
+            if prompt_column is None and length_order:
+                prompt_column = length_order[0]
+            if response_column is None and len(length_order) > 1:
+                response_column = length_order[-1]
+
+    if prompt_column is None:
+        raise ValueError("Unable to infer prompt column from train.csv")
+    if response_column is None:
+        response_column = prompt_column
+
+    return prompt_column, response_column, train_object_columns, test_object_columns
+
+
+def duplicate_groups(series: pd.Series) -> dict[str, list[int]]:
+    groups: dict[str, list[int]] = defaultdict(list)
+    for index, value in series.items():
+        normalized = normalize_text(value)
+        if normalized:
+            groups[normalized].append(int(index))
+    return groups
+
+
+def row_statistics(series: pd.Series) -> dict[str, Any]:
+    values = series.fillna("").astype(str)
+    char_counts = values.str.len()
+    word_counts = values.str.split().map(len)
+    return {
+        "count": int(len(values)),
+        "missing": int(series.isna().sum()),
+        "unique": int(values.nunique(dropna=False)),
+        "chars": {
+            "min": int(char_counts.min()),
+            "mean": float(char_counts.mean()),
+            "median": float(char_counts.median()),
+            "p95": float(char_counts.quantile(0.95)),
+            "max": int(char_counts.max()),
+        },
+        "words": {
+            "min": int(word_counts.min()),
+            "mean": float(word_counts.mean()),
+            "median": float(word_counts.median()),
+            "p95": float(word_counts.quantile(0.95)),
+            "max": int(word_counts.max()),
+        },
+    }
+
+
+def risk_flags(series: pd.Series) -> dict[str, int]:
+    hits: Counter[str] = Counter()
+    for text in series.fillna("").astype(str):
+        lower = text.lower()
+        for keyword in RISK_KEYWORDS:
+            if keyword.lower() in lower:
+                hits[keyword] += 1
+    return dict(hits.most_common())
+
+
+def conflict_summary(train: pd.DataFrame, prompt_column: str, response_column: str) -> dict[str, Any]:
+    prompt_map = duplicate_groups(train[prompt_column])
+    response_norm = train[response_column].map(normalize_text)
+
+    exact_conflicts: dict[str, dict[str, Any]] = {}
+    for prompt, row_indexes in prompt_map.items():
+        responses = response_norm.iloc[row_indexes]
+        if responses.nunique(dropna=False) > 1:
+            exact_conflicts[prompt] = {
+                "row_count": int(len(row_indexes)),
+                "unique_responses": int(responses.nunique(dropna=False)),
+                "example_rows": row_indexes[:10],
+            }
+
+    return {
+        "duplicate_prompt_groups": {prompt: row_indexes for prompt, row_indexes in prompt_map.items() if len(row_indexes) > 1},
+        "conflicting_prompt_groups": exact_conflicts,
+    }
+
+
+def embedding_near_duplicates(
+    train_prompts: pd.Series,
+    test_prompts: pd.Series,
+    threshold: float = 0.90,
+) -> dict[str, Any]:
+    combined_texts = pd.concat([train_prompts, test_prompts], ignore_index=True).fillna("").astype(str).map(normalize_text)
+    train_count = len(train_prompts)
+
+    model_name = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    try:
+        from sentence_transformers import SentenceTransformer
+
+        model = SentenceTransformer(model_name)
+        embeddings = model.encode(combined_texts.tolist(), normalize_embeddings=True, batch_size=32, show_progress_bar=False)
+        embeddings = np.asarray(embeddings, dtype=np.float32)
+        train_embeddings = embeddings[:train_count]
+        test_embeddings = embeddings[train_count:]
+
+        if len(train_embeddings) == 0 or len(test_embeddings) == 0:
+            return {
+                "method": model_name,
+                "threshold": threshold,
+                "pairs": [],
+                "status": "insufficient_rows",
+            }
+
+        nn = NearestNeighbors(n_neighbors=1, metric="cosine")
+        nn.fit(train_embeddings)
+        distances, indices = nn.kneighbors(test_embeddings)
+        pairs = []
+        for test_index, (distance, train_index) in enumerate(zip(distances[:, 0], indices[:, 0])):
+            score = float(1.0 - distance)
+            if score >= threshold:
+                pairs.append(
+                    {
+                        "test_row": int(test_index),
+                        "train_row": int(train_index),
+                        "score": score,
+                    }
+                )
+
+        return {
+            "method": model_name,
+            "threshold": threshold,
+            "pairs": pairs,
+            "status": "ok",
+        }
+    except Exception as exc:  # pragma: no cover - fallback only if model download/runtime fails
+        vectorizer = TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 5), min_df=1)
+        matrix = vectorizer.fit_transform(combined_texts.tolist())
+        train_matrix = matrix[:train_count]
+        test_matrix = matrix[train_count:]
+        if train_matrix.shape[0] == 0 or test_matrix.shape[0] == 0:
+            return {
+                "method": f"tfidf_fallback:{exc}",
+                "threshold": threshold,
+                "pairs": [],
+                "status": "insufficient_rows",
+            }
+
+        similarities = cosine_similarity(test_matrix, train_matrix)
+        best_scores = similarities.max(axis=1)
+        best_indices = similarities.argmax(axis=1)
+        pairs = []
+        for test_index, (score, train_index) in enumerate(zip(best_scores, best_indices)):
+            if float(score) >= threshold:
+                pairs.append(
+                    {
+                        "test_row": int(test_index),
+                        "train_row": int(train_index),
+                        "score": float(score),
+                    }
+                )
+        return {
+            "method": f"tfidf_fallback:{exc}",
+            "threshold": threshold,
+            "pairs": pairs,
+            "status": "fallback_used",
+        }
+
+
+def write_config_updates(prompt_column: str, response_column: str) -> dict[str, Any]:
+    config = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    updated = {
+        "competition_input_directory": "data/raw",
+        "train_filename": "train.csv",
+        "test_filename": "test.csv",
+        "sample_submission_filename": config.get("sample_submission_filename", "TBD"),
+        "id_column": config.get("id_column", "TBD"),
+        "prompt_column": prompt_column,
+        "response_column": response_column,
+        "submission_prediction_column": response_column,
+    }
+
+    if config != updated:
+        CONFIG_PATH.write_text(yaml.safe_dump(updated, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    return updated
+
+
+def build_report(train: pd.DataFrame, test: pd.DataFrame, prompt_column: str, response_column: str, train_object_columns: list[str], test_object_columns: list[str]) -> dict[str, Any]:
+    train_prompt_norm = train[prompt_column].map(normalize_text)
+    test_prompt_norm = test[prompt_column].map(normalize_text)
+    train_response_norm = train[response_column].map(normalize_text)
+
+    exact_cross_prompt_overlap = sorted({value for value in test_prompt_norm if value and value in set(train_prompt_norm)})
+    exact_cross_pairs = []
+    prompt_to_train_rows = defaultdict(list)
+    for index, value in train_prompt_norm.items():
+        if value:
+            prompt_to_train_rows[value].append(int(index))
+    for test_index, value in test_prompt_norm.items():
+        if value and value in prompt_to_train_rows:
+            exact_cross_pairs.append(
+                {
+                    "test_row": int(test_index),
+                    "prompt": value,
+                    "train_rows": prompt_to_train_rows[value][:10],
+                }
+            )
+
+    train_full_row_duplicates = int(train.duplicated().sum())
+    test_full_row_duplicates = int(test.duplicated().sum())
+    train_prompt_duplicates = int(train_prompt_norm.duplicated().sum())
+    test_prompt_duplicates = int(test_prompt_norm.duplicated().sum())
+
+    prompt_conflicts = conflict_summary(train, prompt_column, response_column)
+
+    near_duplicate_summary = embedding_near_duplicates(train[prompt_column], test[prompt_column], threshold=0.90)
+    near_duplicate_pairs = near_duplicate_summary["pairs"]
+
+    repeated_responses = train[response_column].fillna("").astype(str).value_counts()
+    unique_response_ratio = float(train[response_column].fillna("").astype(str).nunique() / len(train)) if len(train) else 0.0
+
+    category_candidates = [
+        column
+        for column in train.columns
+        if any(token in column.lower() for token in ["category", "specialty", "department", "field"])
+    ]
+
+    report = {
+        "source_files": {
+            "train_filename": TRAIN_PATH.name,
+            "test_filename": TEST_PATH.name,
+            "sample_submission_filename": None,
+        },
+        "inferred_columns": {
+            "prompt_column": prompt_column,
+            "response_column": response_column,
+        },
+        "schema": {
+            "train": {
+                "columns": list(train.columns),
+                "dtypes": {column: str(dtype) for column, dtype in train.dtypes.items()},
+                "row_count": int(len(train)),
+            },
+            "test": {
+                "columns": list(test.columns),
+                "dtypes": {column: str(dtype) for column, dtype in test.dtypes.items()},
+                "row_count": int(len(test)),
+            },
+        },
+        "missing_values": {
+            "train": {column: int(value) for column, value in train.isna().sum().items()},
+            "test": {column: int(value) for column, value in test.isna().sum().items()},
+        },
+        "duplicates": {
+            "train_full_row_duplicates": train_full_row_duplicates,
+            "test_full_row_duplicates": test_full_row_duplicates,
+            "train_prompt_duplicates": train_prompt_duplicates,
+            "test_prompt_duplicates": test_prompt_duplicates,
+            "exact_cross_split_prompt_overlap_count": len(exact_cross_prompt_overlap),
+            "exact_cross_split_pairs": exact_cross_pairs[:200],
+            "near_duplicate_method": near_duplicate_summary["method"],
+            "near_duplicate_threshold": near_duplicate_summary["threshold"],
+            "near_cross_split_pairs": near_duplicate_pairs[:200],
+            "train_conflicting_prompt_groups": prompt_conflicts["conflicting_prompt_groups"],
+            "train_duplicate_prompt_groups": prompt_conflicts["duplicate_prompt_groups"],
+        },
+        "text_statistics": {
+            "train_prompt": row_statistics(train[prompt_column]),
+            "train_response": row_statistics(train[response_column]),
+            "test_prompt": row_statistics(test[prompt_column]),
+        },
+        "vocabulary": {
+            "prompt_unique_tokens": int(len({token for token, _ in top_tokens(train[prompt_column], limit=10_000)})),
+            "prompt_top_tokens": top_tokens(train[prompt_column], limit=50),
+            "response_unique_tokens": int(len({token for token, _ in top_tokens(train[response_column], limit=10_000)})),
+            "response_top_tokens": top_tokens(train[response_column], limit=50),
+        },
+        "language_quality": {
+            "train_prompt": text_quality(train[prompt_column]),
+            "train_response": text_quality(train[response_column]),
+            "test_prompt": text_quality(test[prompt_column]),
+        },
+        "response_diversity": {
+            "unique_response_ratio": unique_response_ratio,
+            "responses_seen_2plus": int((repeated_responses >= 2).sum()),
+            "responses_seen_5plus": int((repeated_responses >= 5).sum()),
+            "top_repeated_responses": repeated_responses.head(25).to_dict(),
+        },
+        "medical_category": {
+            "available_columns": category_candidates,
+            "note": "No obvious category/specialty field detected" if not category_candidates else "Category-like fields detected",
+        },
+        "split_recommendation": {
+            "strategy": "Fixed seed, content-aware split by prompt text with exact and near-duplicate groups kept together, length-bucket stratification, and category stratification if a category field exists.",
+            "seed": 42,
+            "grouping_key": prompt_column,
+            "length_buckets": "Quantile buckets from prompt length, with response length as a secondary diagnostic.",
+            "leakage_guard": "Re-check exact and embedding-near duplicates across the final train/validation boundary before freezing the split.",
+        },
+        "retrieval_suitability": {
+            "assessment": "High if responses are repetitive or templated; exact-match and BM25 should be strong baselines, with embedding retrieval useful for paraphrases and lexical drift.",
+            "signals": {
+                "duplicate_prompt_groups": len(prompt_conflicts["duplicate_prompt_groups"]),
+                "conflicting_prompt_groups": len(prompt_conflicts["conflicting_prompt_groups"]),
+                "near_duplicate_cross_split_pairs": len(near_duplicate_pairs),
+            },
+        },
+        "safety_risk_surface": {
+            "train_prompt_keyword_hits": risk_flags(train[prompt_column]),
+            "train_response_keyword_hits": risk_flags(train[response_column]),
+            "test_prompt_keyword_hits": risk_flags(test[prompt_column]),
+            "purpose": "Triage aid for manual review, not a diagnostic classifier.",
+        },
+        "notes": {
+            "train_object_columns": train_object_columns,
+            "test_object_columns": test_object_columns,
+            "sample_submission_present": (ROOT / "data" / "raw" / "sample_submission.csv").exists(),
+        },
+    }
+
+    return report
+
+
+def render_markdown(report: dict[str, Any]) -> str:
+    schema_train = report["schema"]["train"]
+    schema_test = report["schema"]["test"]
+    duplicates = report["duplicates"]
+    split = report["split_recommendation"]
+    retrieval = report["retrieval_suitability"]
+    safety = report["safety_risk_surface"]
+
+    lines = [
+        "# Data Audit",
+        "",
+        "## Source Files",
+        f"- train: `{report['source_files']['train_filename']}`",
+        f"- test: `{report['source_files']['test_filename']}`",
+        f"- sample submission present: `{report['notes']['sample_submission_present']}`",
+        "",
+        "## Inferred Columns",
+        f"- prompt column: `{report['inferred_columns']['prompt_column']}`",
+        f"- response column: `{report['inferred_columns']['response_column']}`",
+        "",
+        "## Schema",
+        f"- train rows: `{schema_train['row_count']}`",
+        f"- test rows: `{schema_test['row_count']}`",
+        f"- train columns: `{', '.join(schema_train['columns'])}`",
+        f"- test columns: `{', '.join(schema_test['columns'])}`",
+        "",
+        "## Duplicate Findings",
+        f"- train full-row duplicates: `{duplicates['train_full_row_duplicates']}`",
+        f"- test full-row duplicates: `{duplicates['test_full_row_duplicates']}`",
+        f"- train prompt duplicates: `{duplicates['train_prompt_duplicates']}`",
+        f"- test prompt duplicates: `{duplicates['test_prompt_duplicates']}`",
+        f"- exact cross-split prompt overlap: `{duplicates['exact_cross_split_prompt_overlap_count']}`",
+        f"- near-duplicate method: `{duplicates['near_duplicate_method']}`",
+        f"- near-duplicate threshold: `{duplicates['near_duplicate_threshold']}`",
+        f"- near cross-split pairs found: `{len(duplicates['near_cross_split_pairs'])}`",
+        f"- conflicting prompt groups in train: `{len(duplicates['train_conflicting_prompt_groups'])}`",
+        "",
+        "## Split Recommendation",
+        f"- strategy: {split['strategy']}",
+        f"- seed: `{split['seed']}`",
+        f"- grouping key: `{split['grouping_key']}`",
+        f"- leakage guard: {split['leakage_guard']}",
+        "",
+        "## Retrieval Suitability",
+        f"- assessment: {retrieval['assessment']}",
+        f"- duplicate prompt groups: `{retrieval['signals']['duplicate_prompt_groups']}`",
+        f"- conflicting prompt groups: `{retrieval['signals']['conflicting_prompt_groups']}`",
+        f"- near-duplicate cross-split pairs: `{retrieval['signals']['near_duplicate_cross_split_pairs']}`",
+        "",
+        "## Safety Surface",
+        f"- prompt keyword hits: `{safety['train_prompt_keyword_hits']}`",
+        f"- response keyword hits: `{safety['train_response_keyword_hits']}`",
+        f"- test prompt keyword hits: `{safety['test_prompt_keyword_hits']}`",
+        "",
+        "## Notes",
+        f"- category-like columns: `{report['medical_category']['available_columns']}`",
+        f"- category note: {report['medical_category']['note']}",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def main() -> int:
-    raise NotImplementedError("Data audit is not implemented yet.")
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    train = pd.read_csv(TRAIN_PATH)
+    test = pd.read_csv(TEST_PATH)
+
+    prompt_column, response_column, train_object_columns, test_object_columns = infer_text_columns(train, test)
+    config_update = write_config_updates(prompt_column, response_column)
+    report = build_report(train, test, prompt_column, response_column, train_object_columns, test_object_columns)
+    report["config_update"] = config_update
+
+    REPORT_JSON_PATH.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    REPORT_MD_PATH.write_text(render_markdown(report), encoding="utf-8")
+
+    print(json.dumps(
+        {
+            "prompt_column": prompt_column,
+            "response_column": response_column,
+            "train_rows": len(train),
+            "test_rows": len(test),
+            "config_updated": config_update,
+            "markdown_report": str(REPORT_MD_PATH),
+            "json_report": str(REPORT_JSON_PATH),
+        },
+        ensure_ascii=False,
+        indent=2,
+    ))
+    return 0
 
 
 if __name__ == "__main__":
