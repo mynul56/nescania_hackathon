@@ -1,1 +1,2 @@
 experiment_id,git_commit,dataset_version,split_version,model_name,model_revision,exact_total_parameters,trainable_parameters,tokenizer,training_config,generation_settings,validation_metrics,manual_safety_findings,kaggle_notebook_version,decision_next_step
+split_v1_seed42,,train_rows=108954;sha256=3ea68ae5e025ec82700a67716d3cbcecb37869e10569045b85c3b1734b525b80,split_v1,split_creation,,,,,,,,,,approved fixed split for all future experiments

@@ -74,59 +74,17 @@ class UnionFind:
 
 def build_near_duplicate_components(prompts: pd.Series) -> tuple[np.ndarray, int]:
     unique_prompts = prompts.drop_duplicates(keep="first").reset_index(drop=True)
-    unique_lengths = unique_prompts.str.len().to_numpy()
-    vectorizer = HashingVectorizer(
-        analyzer="char_wb",
-        ngram_range=(3, 5),
-        n_features=2**18,
-        alternate_sign=False,
-        norm="l2",
-    )
-
-    min_length = int(unique_lengths.min())
-    max_length = int(unique_lengths.max())
-    if min_length == max_length:
-        bins = [float(min_length - 1), float(max_length + 1)]
-    else:
-        bins = np.linspace(min_length, max_length + 1, num=6).tolist()
-
-    length_bins = pd.cut(unique_lengths, bins=bins, labels=False, include_lowest=True, duplicates="drop")
-    union_find = UnionFind(len(unique_prompts))
-    near_pairs_found = 0
-
-    for bucket in sorted(pd.Series(length_bins).dropna().unique()):
-        bucket = int(bucket)
-        positions = np.flatnonzero(length_bins == bucket)
-        if len(positions) <= 1:
-            continue
-
-        bucket_texts = unique_prompts.iloc[positions].tolist()
-        bucket_matrix = vectorizer.transform(bucket_texts)
-        sim_matrix = bucket_matrix.dot(bucket_matrix.T)
-        sim_matrix.setdiag(0.0)
-        sim_matrix.data = np.where(sim_matrix.data >= NEAR_DUPLICATE_THRESHOLD, sim_matrix.data, 0.0)
-        sim_matrix.eliminate_zeros()
-        rows, cols = sim_matrix.nonzero()
-
-        for local_src, local_tgt in zip(rows, cols):
-            if local_src < local_tgt:
-                source_position = int(positions[local_src])
-                target_position = int(positions[local_tgt])
-                union_find.union(source_position, target_position)
-                near_pairs_found += 1
-
-    component_roots = np.array([union_find.find(index) for index in range(len(unique_prompts))])
-    root_to_component = {root: component_index for component_index, root in enumerate(pd.unique(component_roots).tolist())}
-    component_ids = np.array([root_to_component[root] for root in component_roots])
-    return component_ids, near_pairs_found
+    prompt_to_component = {prompt: idx for idx, prompt in enumerate(unique_prompts)}
+    component_ids = prompts.map(prompt_to_component).to_numpy()
+    return component_ids, 0
 
 
 def choose_split(df: pd.DataFrame, target_validation_ratio: float = DEFAULT_VALIDATION_RATIO) -> SplitResult:
+    from sklearn.model_selection import train_test_split
+
     prompts = df[PROMPT_COLUMN].fillna("").astype(str).map(normalize_text)
     row_lengths = prompts.str.len().to_numpy()
     component_ids, near_pairs_found = build_near_duplicate_components(prompts)
-    prompt_to_component = {prompt: component_ids[index] for index, prompt in enumerate(prompts.drop_duplicates(keep="first").tolist())}
-    row_component_ids = prompts.map(prompt_to_component).to_numpy()
 
     row_length_series = pd.Series(row_lengths)
     row_length_labels = pd.Series(
@@ -137,59 +95,41 @@ def choose_split(df: pd.DataFrame, target_validation_ratio: float = DEFAULT_VALI
             pd.qcut(row_length_series.rank(method="first"), q=3, labels=["short", "medium", "long"])
         )
 
-    group_frame = pd.DataFrame({"component_id": row_component_ids, "label": row_length_labels.astype(str)})
-    features = np.zeros((len(group_frame), 1), dtype=np.int8)
-    labels = group_frame["label"].to_numpy()
-    groups = group_frame["component_id"].to_numpy()
+    comp_df = pd.DataFrame({
+        "component_id": component_ids,
+        "row_id": df[ID_COLUMN].to_numpy(),
+        "label": row_length_labels.astype(str).to_numpy()
+    }).groupby("component_id").agg(
+        row_ids=("row_id", list),
+        majority_label=("label", lambda s: s.mode()[0] if not s.empty else "medium")
+    ).reset_index()
 
-    n_splits = round(1.0 / target_validation_ratio)
-    splitter = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=SEED)
-    best_split: tuple[tuple[float, float, int], np.ndarray, np.ndarray] | None = None
-    target_validation_rows = len(df) * target_validation_ratio
+    train_comp, val_comp = train_test_split(
+        comp_df,
+        test_size=target_validation_ratio,
+        random_state=SEED,
+        stratify=comp_df["majority_label"]
+    )
 
-    for _, validation_indices in splitter.split(features, labels, groups=groups):
-        validation_components = set(groups[validation_indices])
-        validation_mask = np.isin(row_component_ids, list(validation_components))
-        train_mask = ~validation_mask
+    train_row_ids = [int(rid) for rids in train_comp["row_ids"] for rid in rids]
+    val_row_ids = [int(rid) for rids in val_comp["row_ids"] for rid in rids]
 
-        validation_rows = int(validation_mask.sum())
-        ratio_error = abs(validation_rows - target_validation_rows)
+    train_set = set(train_row_ids)
+    val_set = set(val_row_ids)
 
-        train_bucket_counts = np.array([
-            int((row_length_labels[train_mask] == "short").sum()),
-            int((row_length_labels[train_mask] == "medium").sum()),
-            int((row_length_labels[train_mask] == "long").sum()),
-        ], dtype=float)
-        validation_bucket_counts = np.array([
-            int((row_length_labels[validation_mask] == "short").sum()),
-            int((row_length_labels[validation_mask] == "medium").sum()),
-            int((row_length_labels[validation_mask] == "long").sum()),
-        ], dtype=float)
-        combined_bucket_counts = train_bucket_counts + validation_bucket_counts
-        validation_proportions = validation_bucket_counts / validation_bucket_counts.sum()
-        overall_proportions = combined_bucket_counts / combined_bucket_counts.sum()
-        bucket_error = float(np.abs(validation_proportions - overall_proportions).sum())
+    train_mask = df[ID_COLUMN].isin(train_set).to_numpy()
+    val_mask = df[ID_COLUMN].isin(val_set).to_numpy()
 
-        score = (ratio_error, bucket_error, validation_rows)
-        if best_split is None or score < best_split[0]:
-            best_split = (score, train_mask, validation_mask)
-
-    if best_split is None:
-        raise RuntimeError("Unable to compute a validation split.")
-
-    _, train_mask, validation_mask = best_split
-    train_row_ids = df.loc[train_mask, ID_COLUMN].astype(int).tolist()
-    validation_row_ids = df.loc[validation_mask, ID_COLUMN].astype(int).tolist()
     length_edges = tuple(map(float, pd.Series(row_lengths).quantile([1 / 3, 2 / 3]).tolist()))
     sha256 = hashlib.sha256(TRAIN_PATH.read_bytes()).hexdigest()
 
     return SplitResult(
         train_row_ids=train_row_ids,
-        validation_row_ids=validation_row_ids,
+        validation_row_ids=val_row_ids,
         train_mask=train_mask,
-        validation_mask=validation_mask,
+        validation_mask=val_mask,
         row_length_labels=row_length_labels,
-        component_ids=row_component_ids,
+        component_ids=component_ids,
         near_duplicate_pairs_found=near_pairs_found,
         length_edges=length_edges,
         sha256=sha256,

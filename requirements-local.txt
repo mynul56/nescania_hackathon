@@ -6,4 +6,6 @@ ruff
 scikit-learn
 rank-bm25
 sentence-transformers
+rouge-score
+bert-score
 tqdm
