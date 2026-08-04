@@ -297,7 +297,7 @@ def embedding_near_duplicates(
     train_embeddings = matrix[:train_count]
     test_embeddings = matrix[train_count:]
 
-    max_train_candidates_per_bucket = 5000
+    max_train_candidates_per_bucket = 1000
 
     for bucket in sorted(pd.Series(test_bins).dropna().unique()):
         bucket = int(bucket)
