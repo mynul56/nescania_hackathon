@@ -321,11 +321,13 @@ def build_report(train: pd.DataFrame, test: pd.DataFrame, prompt_column: str, re
     train_prompt_norm = train_prompt_text
     test_prompt_norm = test_prompt_text
     train_response_norm = train_response_text
-    exact_cross_prompt_overlap = sorted({value for value in test_prompt_norm if value and value in set(train_prompt_norm)})
+    train_prompt_lookup = set(train_prompt_norm[train_prompt_norm != ""].drop_duplicates())
+    exact_cross_mask = test_prompt_norm.isin(train_prompt_lookup)
+    exact_cross_prompt_overlap = int(exact_cross_mask.sum())
     exact_cross_pairs = []
     prompt_to_train_rows = train_prompt_norm[train_prompt_norm != ""].groupby(train_prompt_norm[train_prompt_norm != ""]).indices
-    for test_index, value in test_prompt_norm.items():
-        if value and value in prompt_to_train_rows:
+    for test_index, value in test_prompt_norm[exact_cross_mask].items():
+        if value in prompt_to_train_rows:
             exact_cross_pairs.append(
                 {
                     "test_row": int(test_index),
