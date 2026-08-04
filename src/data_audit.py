@@ -11,8 +11,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import yaml
-from sklearn.feature_extraction.text import HashingVectorizer, TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.feature_extraction.text import HashingVectorizer
 from sklearn.neighbors import NearestNeighbors
 
 
@@ -86,7 +85,7 @@ def safe_utf8_row_count(series: pd.Series) -> dict[str, int]:
     return {
         "utf8_encodable_rows": encodable,
         "non_encodable_rows": non_encodable,
-        "total_rows": int(len(series)),
+        "total_rows": len(series),
     }
 
 
@@ -100,7 +99,7 @@ def text_quality(series: pd.Series) -> dict[str, Any]:
     digit_counts = values.map(lambda item: len(DIGIT_RE.findall(item)))
 
     return {
-        "row_count": int(len(values)),
+        "row_count": len(values),
         "unique_values": int(values.nunique(dropna=False)),
         "char_stats": {
             "min": int(char_counts.min()),
@@ -237,7 +236,7 @@ def conflict_summary(train: pd.DataFrame, prompt_column: str, response_column: s
         if prompt and unique_response_count > 1:
             row_indexes = prompt_map.get(prompt, [])
             exact_conflicts[prompt] = {
-                "row_count": int(len(row_indexes)),
+                "row_count": len(row_indexes),
                 "unique_responses": int(unique_response_count),
                 "example_rows": row_indexes[:10],
             }
@@ -416,8 +415,15 @@ def build_report(train: pd.DataFrame, test: pd.DataFrame, prompt_column: str, re
     test_unique_prompt_series = test_unique_prompt_rows[prompt_column].fillna("").astype(str)
     mark_status("build_report:unique_text_series_ready")
 
+    mark_status("build_report:counting_repeated_responses")
     repeated_responses = train[response_column].fillna("").astype(str).value_counts()
     unique_response_ratio = float(train[response_column].fillna("").astype(str).nunique() / len(train)) if len(train) else 0.0
+    mark_status("build_report:repeated_responses_counted")
+
+    mark_status("build_report:building_vocabulary")
+    prompt_vocab = top_tokens(train_unique_prompt_series, limit=10_000)
+    response_vocab = top_tokens(train_unique_response_series, limit=10_000)
+    mark_status("build_report:vocabulary_built")
 
     category_candidates = [
         column
@@ -439,12 +445,12 @@ def build_report(train: pd.DataFrame, test: pd.DataFrame, prompt_column: str, re
             "train": {
                 "columns": list(train.columns),
                 "dtypes": {column: str(dtype) for column, dtype in train.dtypes.items()},
-                "row_count": int(len(train)),
+                "row_count": len(train),
             },
             "test": {
                 "columns": list(test.columns),
                 "dtypes": {column: str(dtype) for column, dtype in test.dtypes.items()},
-                "row_count": int(len(test)),
+                "row_count": len(test),
             },
         },
         "missing_values": {
@@ -470,10 +476,10 @@ def build_report(train: pd.DataFrame, test: pd.DataFrame, prompt_column: str, re
             "test_prompt": row_statistics(test[prompt_column]),
         },
         "vocabulary": {
-            "prompt_unique_tokens": int(len({token for token, _ in top_tokens(train_unique_prompt_series, limit=10_000)})),
-            "prompt_top_tokens": top_tokens(train_unique_prompt_series, limit=50),
-            "response_unique_tokens": int(len({token for token, _ in top_tokens(train_unique_response_series, limit=10_000)})),
-            "response_top_tokens": top_tokens(train_unique_response_series, limit=50),
+            "prompt_unique_tokens": len({token for token, _ in prompt_vocab}),
+            "prompt_top_tokens": prompt_vocab[:50],
+            "response_unique_tokens": len({token for token, _ in response_vocab}),
+            "response_top_tokens": response_vocab[:50],
         },
         "language_quality": {
             "train_prompt": text_quality(train[prompt_column]),
