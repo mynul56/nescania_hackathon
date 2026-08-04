@@ -253,32 +253,13 @@ def embedding_near_duplicates(
     test_prompts: pd.Series,
     threshold: float = 0.90,
 ) -> dict[str, Any]:
-    combined_texts = normalize_series(pd.concat([train_prompts, test_prompts], ignore_index=True))
     train_count = len(train_prompts)
     train_lengths = train_prompts.fillna("").astype(str).str.len().to_numpy()
     test_lengths = test_prompts.fillna("").astype(str).str.len().to_numpy()
 
-    vectorizer = HashingVectorizer(
-        analyzer="char_wb",
-        ngram_range=(3, 5),
-        n_features=2**18,
-        alternate_sign=False,
-        norm="l2",
-    )
-    matrix = vectorizer.transform(combined_texts.tolist())
-
-    if train_count == 0 or matrix.shape[0] <= train_count:
-        return {
-            "method": "hashing_char_wb",
-            "threshold": threshold,
-            "pairs": [],
-            "status": "insufficient_rows",
-        }
-
-    pairs = []
     if train_count == 0 or len(test_prompts) == 0:
         return {
-            "method": "hashing_char_wb_embeddings",
+            "method": "hashing_char_wb",
             "threshold": threshold,
             "pairs": [],
             "status": "insufficient_rows",
@@ -294,10 +275,16 @@ def embedding_near_duplicates(
 
     train_bins = pd.cut(train_lengths, bins=bins, labels=False, include_lowest=True, duplicates="drop")
     test_bins = pd.cut(test_lengths, bins=bins, labels=False, include_lowest=True, duplicates="drop")
-    train_embeddings = matrix[:train_count]
-    test_embeddings = matrix[train_count:]
+    vectorizer = HashingVectorizer(
+        analyzer="char_wb",
+        ngram_range=(3, 5),
+        n_features=2**18,
+        alternate_sign=False,
+        norm="l2",
+    )
 
     max_train_candidates_per_bucket = 1000
+    pairs = []
 
     for bucket in sorted(pd.Series(test_bins).dropna().unique()):
         bucket = int(bucket)
@@ -313,19 +300,23 @@ def embedding_near_duplicates(
             keep_order = np.argsort(np.abs(bucket_train_lengths - bucket_center))[:max_train_candidates_per_bucket]
             train_positions = train_positions[keep_order]
 
-        bucket_train_embeddings = train_embeddings[train_positions]
-        bucket_test_embeddings = test_embeddings[test_mask]
+        bucket_test_positions = np.flatnonzero(test_mask)
+        bucket_train_texts = normalize_series(train_prompts.iloc[train_positions])
+        bucket_test_texts = normalize_series(test_prompts.iloc[bucket_test_positions])
+        bucket_texts = pd.concat([bucket_train_texts, bucket_test_texts], ignore_index=True)
+        bucket_matrix = vectorizer.transform(bucket_texts.tolist())
+        bucket_train_embeddings = bucket_matrix[: len(bucket_train_texts)]
+        bucket_test_embeddings = bucket_matrix[len(bucket_train_texts) :]
         nn = NearestNeighbors(n_neighbors=1, metric="cosine", algorithm="brute")
         nn.fit(bucket_train_embeddings)
         distances, indices = nn.kneighbors(bucket_test_embeddings)
 
-        test_positions = np.flatnonzero(test_mask)
         for local_test_index, (distance, train_index) in enumerate(zip(distances[:, 0], indices[:, 0])):
             score = float(1.0 - distance)
             if score >= threshold:
                 pairs.append(
                     {
-                        "test_row": int(test_positions[local_test_index]),
+                        "test_row": int(bucket_test_positions[local_test_index]),
                         "train_row": int(train_positions[train_index]),
                         "score": score,
                     }
@@ -465,7 +456,7 @@ def build_report(train: pd.DataFrame, test: pd.DataFrame, prompt_column: str, re
             "test_full_row_duplicates": test_full_row_duplicates,
             "train_prompt_duplicates": train_prompt_duplicates,
             "test_prompt_duplicates": test_prompt_duplicates,
-            "exact_cross_split_prompt_overlap_count": len(exact_cross_prompt_overlap),
+            "exact_cross_split_prompt_overlap_count": exact_cross_prompt_overlap,
             "exact_cross_split_pairs": exact_cross_pairs[:200],
             "near_duplicate_method": near_duplicate_summary["method"],
             "near_duplicate_threshold": near_duplicate_summary["threshold"],
