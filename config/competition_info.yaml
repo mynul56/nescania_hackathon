@@ -1,0 +1,8 @@
+competition_input_directory: TBD
+train_filename: TBD
+test_filename: TBD
+sample_submission_filename: TBD
+id_column: TBD
+prompt_column: TBD
+response_column: TBD
+submission_prediction_column: TBD

@@ -1,0 +1,17 @@
+# Full training / inference environment for Kaggle or GPU usage.
+# Pin exact versions before a real training run.
+pandas
+numpy
+pyyaml
+tqdm
+scikit-learn
+rank-bm25
+sentence-transformers
+torch
+transformers
+peft
+bitsandbytes
+accelerate
+datasets
+evaluate
+safetensors

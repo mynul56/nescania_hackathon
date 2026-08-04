@@ -1,0 +1,14 @@
+data/raw/
+data/processed/
+models/
+submissions/
+*.ckpt
+*.pt
+*.safetensors
+.venv/
+__pycache__/
+*.pyc
+.env
+outputs/*.png
+!outputs/data_audit.md
+!outputs/data_audit.json

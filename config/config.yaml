@@ -1,0 +1,8 @@
+model_name: TBD
+model_revision: TBD
+lora_r: TBD
+lora_alpha: TBD
+learning_rate: TBD
+batch_size: TBD
+seed: TBD
+split_version: TBD
