@@ -86,9 +86,9 @@ def build_near_duplicate_components(prompts: pd.Series) -> tuple[np.ndarray, int
     min_length = int(unique_lengths.min())
     max_length = int(unique_lengths.max())
     if min_length == max_length:
-        bins = np.array([min_length - 1, max_length + 1])
+        bins = [float(min_length - 1), float(max_length + 1)]
     else:
-        bins = np.linspace(min_length, max_length + 1, num=6)
+        bins = np.linspace(min_length, max_length + 1, num=6).tolist()
 
     length_bins = pd.cut(unique_lengths, bins=bins, labels=False, include_lowest=True, duplicates="drop")
     union_find = UnionFind(len(unique_prompts))
@@ -104,7 +104,9 @@ def build_near_duplicate_components(prompts: pd.Series) -> tuple[np.ndarray, int
         bucket_matrix = vectorizer.transform(bucket_texts)
         sim_matrix = bucket_matrix.dot(bucket_matrix.T)
         sim_matrix.setdiag(0.0)
-        rows, cols = (sim_matrix >= NEAR_DUPLICATE_THRESHOLD).nonzero()
+        sim_matrix.data = np.where(sim_matrix.data >= NEAR_DUPLICATE_THRESHOLD, sim_matrix.data, 0.0)
+        sim_matrix.eliminate_zeros()
+        rows, cols = sim_matrix.nonzero()
 
         for local_src, local_tgt in zip(rows, cols):
             if local_src < local_tgt:
@@ -126,9 +128,14 @@ def choose_split(df: pd.DataFrame, target_validation_ratio: float = DEFAULT_VALI
     prompt_to_component = {prompt: component_ids[index] for index, prompt in enumerate(prompts.drop_duplicates(keep="first").tolist())}
     row_component_ids = prompts.map(prompt_to_component).to_numpy()
 
-    row_length_labels = pd.qcut(row_lengths, q=3, labels=["short", "medium", "long"], duplicates="drop")
+    row_length_series = pd.Series(row_lengths)
+    row_length_labels = pd.Series(
+        pd.qcut(row_length_series, q=3, labels=["short", "medium", "long"], duplicates="drop")
+    )
     if row_length_labels.isna().any():
-        row_length_labels = pd.qcut(pd.Series(row_lengths).rank(method="first"), q=3, labels=["short", "medium", "long"])
+        row_length_labels = pd.Series(
+            pd.qcut(row_length_series.rank(method="first"), q=3, labels=["short", "medium", "long"])
+        )
 
     group_frame = pd.DataFrame({"component_id": row_component_ids, "label": row_length_labels.astype(str)})
     features = np.zeros((len(group_frame), 1), dtype=np.int8)
