@@ -1,1 +1,1 @@
-starting
+build_report:unique_text_series_ready
