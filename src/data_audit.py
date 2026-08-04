@@ -220,16 +220,25 @@ def risk_flags(series: pd.Series) -> dict[str, int]:
 
 
 def conflict_summary(train: pd.DataFrame, prompt_column: str, response_column: str) -> dict[str, Any]:
-    prompt_map = duplicate_groups(train[prompt_column])
-    response_norm = train[response_column].map(normalize_text)
+    prompt_values = train[prompt_column].fillna("").astype(str)
+    response_values = train[response_column].fillna("").astype(str)
+    frame = pd.DataFrame({"prompt": prompt_values, "response": response_values})
 
+    grouped = frame.groupby("prompt", sort=False)
+    prompt_map = {
+        prompt: [int(index) for index in row_indexes]
+        for prompt, row_indexes in grouped.indices.items()
+        if prompt
+    }
+
+    response_nunique = grouped["response"].nunique(dropna=False)
     exact_conflicts: dict[str, dict[str, Any]] = {}
-    for prompt, row_indexes in prompt_map.items():
-        responses = response_norm.iloc[row_indexes]
-        if responses.nunique(dropna=False) > 1:
+    for prompt, unique_response_count in response_nunique.items():
+        if prompt and unique_response_count > 1:
+            row_indexes = prompt_map.get(prompt, [])
             exact_conflicts[prompt] = {
                 "row_count": int(len(row_indexes)),
-                "unique_responses": int(responses.nunique(dropna=False)),
+                "unique_responses": int(unique_response_count),
                 "example_rows": row_indexes[:10],
             }
 
