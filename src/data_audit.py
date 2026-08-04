@@ -297,6 +297,8 @@ def embedding_near_duplicates(
     train_embeddings = matrix[:train_count]
     test_embeddings = matrix[train_count:]
 
+    max_train_candidates_per_bucket = 5000
+
     for bucket in sorted(pd.Series(test_bins).dropna().unique()):
         bucket = int(bucket)
         train_mask = train_bins == bucket
@@ -304,14 +306,20 @@ def embedding_near_duplicates(
         if not train_mask.any() or not test_mask.any():
             continue
 
-        bucket_train_embeddings = train_embeddings[train_mask]
+        train_positions = np.flatnonzero(train_mask)
+        if len(train_positions) > max_train_candidates_per_bucket:
+            bucket_center = (bins[bucket] + bins[bucket + 1]) / 2 if bucket + 1 < len(bins) else bins[bucket]
+            bucket_train_lengths = train_lengths[train_positions]
+            keep_order = np.argsort(np.abs(bucket_train_lengths - bucket_center))[:max_train_candidates_per_bucket]
+            train_positions = train_positions[keep_order]
+
+        bucket_train_embeddings = train_embeddings[train_positions]
         bucket_test_embeddings = test_embeddings[test_mask]
         nn = NearestNeighbors(n_neighbors=1, metric="cosine", algorithm="brute")
         nn.fit(bucket_train_embeddings)
         distances, indices = nn.kneighbors(bucket_test_embeddings)
 
         test_positions = np.flatnonzero(test_mask)
-        train_positions = np.flatnonzero(train_mask)
         for local_test_index, (distance, train_index) in enumerate(zip(distances[:, 0], indices[:, 0])):
             score = float(1.0 - distance)
             if score >= threshold:
