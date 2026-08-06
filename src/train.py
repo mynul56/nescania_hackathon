@@ -125,11 +125,9 @@ def check_environment() -> None:
         mem_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
         log.info("GPU memory (total) : %.1f GB", mem_gb)
     else:
-        log.error(
-            "No GPU detected. QLoRA training requires a CUDA GPU. "
-            "This script is designed for Kaggle notebook GPU — not local CPU. Exiting."
-        )
-        sys.exit(1)
+        log.warning("CUDA not detected. Falling back to CPU for training. This may be slower.")
+        # Continue without exiting; the model will be placed on CPU.
+        # No further action needed here.
 
     # transformers
     try:

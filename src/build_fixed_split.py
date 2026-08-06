@@ -118,7 +118,6 @@ def choose_split(df: pd.DataFrame, target_validation_ratio: float = DEFAULT_VALI
     train_mask = df[ID_COLUMN].isin(train_set).to_numpy()
     val_mask = df[ID_COLUMN].isin(val_set).to_numpy()
 
-    length_edges = tuple(map(float, pd.Series(row_lengths).quantile([1 / 3, 2 / 3]).tolist()))
     sha256 = hashlib.sha256(TRAIN_PATH.read_bytes()).hexdigest()
 
     return SplitResult(
